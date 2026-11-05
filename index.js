@@ -27,8 +27,12 @@ const MIN_MUTE_DURATION = 30;
 
 const PROMO_CHANNEL = "https://t.me/seducteasech";
 
-// Blacklist kata — admin & owner tetap bisa
-const BLACKLIST_WORDS = ["vcs", "vc", "colmek", "omek", "bokep", "bkp", "okep", "sange", "ange", "vgk"];
+// Blacklist kata bawaan (berlaku di semua grup) — admin & owner tetap bisa
+const DEFAULT_BLACKLIST_WORDS = ["vcs", "vc", "colmek", "omek", "bokep", "bkp", "okep", "sange", "ange", "vgk"];
+
+// Blacklist tambahan dari command .blacklist — per grup
+// customBlacklist[chatId] = Set(["kata1", "kata2"])
+const customBlacklist = {};
 
 const userMessages = {};
 
@@ -41,6 +45,55 @@ let welcomeLock = {};
 
 // Simpan jumlah warn per user per grup
 const warnCount = {};
+
+// =======================
+// DATABASE (OPSIONAL)
+// Kalau DATABASE_URL ada, kata blacklist disimpan di Postgres
+// supaya tidak hilang saat bot restart / redeploy.
+// Kalau tidak ada, blacklist hanya tersimpan di memori.
+// =======================
+let pool = null;
+
+if (process.env.DATABASE_URL) {
+  const { Pool } = require("pg");
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+}
+
+(async () => {
+
+  if (!pool) {
+    console.log("⚠️ DATABASE_URL tidak ditemukan — blacklist custom hanya tersimpan di memori.");
+    return;
+  }
+
+  try {
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS blacklist_words (
+        chat_id BIGINT NOT NULL,
+        word TEXT NOT NULL,
+        PRIMARY KEY (chat_id, word)
+      );
+    `);
+
+    const res = await pool.query("SELECT chat_id, word FROM blacklist_words");
+
+    res.rows.forEach(r => {
+      const key = String(r.chat_id);
+      if (!customBlacklist[key]) customBlacklist[key] = new Set();
+      customBlacklist[key].add(r.word);
+    });
+
+    console.log(`✅ Blacklist dimuat dari database (${res.rows.length} kata)`);
+
+  } catch (err) {
+    console.error("DB blacklist error:", err.message);
+  }
+
+})();
 
 // =======================
 // ESCAPE MARKDOWN
@@ -218,10 +271,12 @@ bot.on("message", async (msg) => {
       }
 
       // ===================
-      // BLACKLIST KATA
+      // BLACKLIST KATA (bawaan + custom per grup)
       // ===================
       const textLower = msg.text.toLowerCase();
-      const foundWord = BLACKLIST_WORDS.find(word => textLower.includes(word));
+      const chatWords = customBlacklist[chatId] ? [...customBlacklist[chatId]] : [];
+      const allWords = [...DEFAULT_BLACKLIST_WORDS, ...chatWords];
+      const foundWord = allWords.find(word => textLower.includes(word));
 
       if (foundWord) {
 
@@ -616,5 +671,181 @@ Status: Telah dikeluarkan dari grup
 \`\`\``,
     { parse_mode: "Markdown" }
   );
+
+});
+
+// =======================
+// HELPER: CEK ADMIN UNTUK COMMAND BLACKLIST
+// =======================
+async function isGroupAdmin(msg) {
+
+  if (msg.chat.type === "private") return false;
+  if (!msg.from) return false;
+
+  try {
+    const member = await bot.getChatMember(msg.chat.id, msg.from.id);
+    return ["administrator", "creator"].includes(member.status);
+  } catch {
+    return false;
+  }
+
+}
+
+// Pecah input jadi daftar kata (pisahkan dengan koma), huruf kecil, tanpa duplikat
+function parseWords(input) {
+  return [...new Set(
+    input
+      .split(",")
+      .map(w => w.trim().toLowerCase())
+      .filter(w => w.length > 0)
+  )];
+}
+
+// =======================
+// COMMAND .blacklist
+// Format: .blacklist <kata>
+// Contoh: .blacklist babi
+//         .blacklist babi, anjing, kontol   (banyak kata, pisah koma)
+// =======================
+bot.onText(/^\.blacklist\s+(.+)$/i, async (msg, match) => {
+
+  const chatId = msg.chat.id;
+
+  if (msg.chat.type === "private") return;
+
+  if (!(await isGroupAdmin(msg))) {
+    return bot.sendMessage(chatId, "❌ Hanya admin.");
+  }
+
+  const words = parseWords(match[1]);
+
+  if (words.length === 0) {
+    return bot.sendMessage(chatId, "⚠️ Format: .blacklist <kata>\nContoh: .blacklist babi");
+  }
+
+  // Hapus pesan command supaya kata tidak terlihat di grup
+  try { await bot.deleteMessage(chatId, msg.message_id); } catch {}
+
+  if (!customBlacklist[chatId]) customBlacklist[chatId] = new Set();
+
+  const added = [];
+  const skipped = [];
+
+  for (const word of words) {
+
+    if (DEFAULT_BLACKLIST_WORDS.includes(word) || customBlacklist[chatId].has(word)) {
+      skipped.push(word);
+      continue;
+    }
+
+    customBlacklist[chatId].add(word);
+    added.push(word);
+
+    if (pool) {
+      try {
+        await pool.query(
+          "INSERT INTO blacklist_words (chat_id, word) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+          [chatId, word]
+        );
+      } catch (err) {
+        console.error("DB insert blacklist error:", err.message);
+      }
+    }
+
+  }
+
+  let text = "";
+  if (added.length > 0) text += `✅ Ditambahkan ke blacklist: ${added.join(", ")}\n`;
+  if (skipped.length > 0) text += `ℹ️ Sudah ada di blacklist: ${skipped.join(", ")}`;
+
+  bot.sendMessage(chatId, text.trim());
+
+});
+
+// =======================
+// COMMAND .unblacklist
+// Format: .unblacklist <kata>
+// (hanya untuk kata yang ditambah lewat .blacklist, bukan kata bawaan)
+// =======================
+bot.onText(/^\.unblacklist\s+(.+)$/i, async (msg, match) => {
+
+  const chatId = msg.chat.id;
+
+  if (msg.chat.type === "private") return;
+
+  if (!(await isGroupAdmin(msg))) {
+    return bot.sendMessage(chatId, "❌ Hanya admin.");
+  }
+
+  const words = parseWords(match[1]);
+
+  try { await bot.deleteMessage(chatId, msg.message_id); } catch {}
+
+  const removed = [];
+  const notFound = [];
+
+  for (const word of words) {
+
+    if (DEFAULT_BLACKLIST_WORDS.includes(word)) {
+      notFound.push(`${word} (kata bawaan, tidak bisa dihapus lewat command)`);
+      continue;
+    }
+
+    if (customBlacklist[chatId] && customBlacklist[chatId].delete(word)) {
+
+      removed.push(word);
+
+      if (pool) {
+        try {
+          await pool.query(
+            "DELETE FROM blacklist_words WHERE chat_id=$1 AND word=$2",
+            [chatId, word]
+          );
+        } catch (err) {
+          console.error("DB delete blacklist error:", err.message);
+        }
+      }
+
+    } else {
+      notFound.push(word);
+    }
+
+  }
+
+  let text = "";
+  if (removed.length > 0) text += `✅ Dihapus dari blacklist: ${removed.join(", ")}\n`;
+  if (notFound.length > 0) text += `❌ Tidak ditemukan: ${notFound.join(", ")}`;
+
+  bot.sendMessage(chatId, text.trim());
+
+});
+
+// =======================
+// COMMAND .listblacklist
+// =======================
+bot.onText(/^\.listblacklist$/i, async (msg) => {
+
+  const chatId = msg.chat.id;
+
+  if (msg.chat.type === "private") return;
+
+  if (!(await isGroupAdmin(msg))) {
+    return bot.sendMessage(chatId, "❌ Hanya admin.");
+  }
+
+  try { await bot.deleteMessage(chatId, msg.message_id); } catch {}
+
+  const custom = customBlacklist[chatId] ? [...customBlacklist[chatId]] : [];
+
+  const text =
+`📋 Daftar Blacklist
+
+Bawaan (${DEFAULT_BLACKLIST_WORDS.length}):
+${DEFAULT_BLACKLIST_WORDS.join(", ")}
+
+Tambahan grup ini (${custom.length}):
+${custom.length > 0 ? custom.join(", ") : "-"}`;
+
+  bot.sendMessage(chatId, text);
 
 });
