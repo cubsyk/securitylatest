@@ -432,21 +432,23 @@ bot.onText(/^\.vip$/, async (msg) => {
   try { await bot.deleteMessage(chatId, msg.message_id); } catch {}
 
   bot.sendMessage(chatId,
-`𝙑𝙄𝙋 𝙂𝙍𝙐𝙋 𝙎𝙀𝘿𝙐𝘾𝙏𝙀𝘼𝙎𝙀
+`𝙑𝙡𝙋 𝙂𝙍𝙐𝙋 𝙎𝙀𝘿𝙐𝘾𝙏𝙀𝘼𝙎𝙀
 
-5 rb video
+𝟷𝟶.𝟶𝟶𝟶+ ᴋᴏɴᴛᴇɴ
 ɪɴᴄʟᴜᴅᴇ ᴘʀᴇᴍɪᴜᴍ ᴠɪᴅᴇᴏ
-- KOLEKSI BOWCIL
-- ᴄɪᴍᴏʟʟᴀ ғᴜʟʟᴘᴀᴄᴋ ɴᴇᴡ ᴜᴘᴅᴀᴛᴇ
-- ᴛᴀʟᴇɴᴛ ᴄᴇᴄᴇ ғᴜʟʟᴘᴀᴄᴋ
+- ᴏᴍᴇᴛᴠ
+- ʙᴏᴡᴄɪʟ
+- ᴀʟʟ ᴛᴀʟᴇɴᴛ/ᴛɪᴋᴛᴏᴋᴇʀ/sᴇʟᴇʙɢʀ ғᴜʟʟᴘᴀᴄᴋ
 - ᴊᴇᴘᴀɴɢ
-- ɴᴇᴡ ᴄɪᴘᴀ / ᴄɪʙᴇ ᴠᴇsᴍᴇᴛ
+- ʙᴀʀᴀᴛ
 - ᴋᴏʟᴇᴋsɪ ᴊɪʟʙᴀʙ
 - ᴅʟʟ.
 
-ONLY 25K
+ᴜᴘᴅᴀᴛᴇ 𝟸𝟺/𝟽 ᴘʟᴀʏ ᴠɪᴅᴇᴏ ᴛᴀɴᴘᴀ ʟɪɴᴋ
 
-ᴍɪɴᴀᴛ ᴄʜᴀᴛ ᴀᴅᴍɪɴ @mieeayampangsit18
+ONLY 50K
+
+ᴍɪɴᴀᴛ ᴄʜᴀᴛ ᴀᴅᴍɪɴ @mieayampangsit18
 
 testi @testivipseductease`
   );
