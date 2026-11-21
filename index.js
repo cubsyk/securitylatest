@@ -19,11 +19,14 @@ let ANTI_LINK = true;
 let ANTI_SPAM = true;
 let ANTI_FORWARD = true;
 
-let DEFAULT_MUTE_DURATION = 60;
+let DEFAULT_MUTE_DURATION = 5600;
 
 const SPAM_LIMIT = 5;
 const TIME_WINDOW = 5000;
 const MIN_MUTE_DURATION = 30;
+
+// Mute ke-10 = permanen (tidak di-kick)
+const MUTE_LIMIT = 10;
 
 const PROMO_CHANNEL = "https://t.me/seducteasech";
 
@@ -46,11 +49,15 @@ let welcomeLock = {};
 // Simpan jumlah warn per user per grup
 const warnCount = {};
 
+// Simpan jumlah mute per user per grup
+// muteCount[chatId][userId] = jumlah mute
+const muteCount = {};
+
 // =======================
 // DATABASE (OPSIONAL)
-// Kalau DATABASE_URL ada, kata blacklist disimpan di Postgres
+// Kalau DATABASE_URL ada, blacklist & counter mute disimpan di Postgres
 // supaya tidak hilang saat bot restart / redeploy.
-// Kalau tidak ada, blacklist hanya tersimpan di memori.
+// Kalau tidak ada, data hanya tersimpan di memori.
 // =======================
 let pool = null;
 
@@ -65,7 +72,7 @@ if (process.env.DATABASE_URL) {
 (async () => {
 
   if (!pool) {
-    console.log("⚠️ DATABASE_URL tidak ditemukan — blacklist custom hanya tersimpan di memori.");
+    console.log("⚠️ DATABASE_URL tidak ditemukan — data hanya tersimpan di memori.");
     return;
   }
 
@@ -79,6 +86,15 @@ if (process.env.DATABASE_URL) {
       );
     `);
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS mute_counts (
+        chat_id BIGINT NOT NULL,
+        user_id BIGINT NOT NULL,
+        count INT NOT NULL DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id)
+      );
+    `);
+
     const res = await pool.query("SELECT chat_id, word FROM blacklist_words");
 
     res.rows.forEach(r => {
@@ -87,10 +103,18 @@ if (process.env.DATABASE_URL) {
       customBlacklist[key].add(r.word);
     });
 
-    console.log(`✅ Blacklist dimuat dari database (${res.rows.length} kata)`);
+    const mc = await pool.query("SELECT chat_id, user_id, count FROM mute_counts");
+
+    mc.rows.forEach(r => {
+      const c = String(r.chat_id);
+      if (!muteCount[c]) muteCount[c] = {};
+      muteCount[c][String(r.user_id)] = r.count;
+    });
+
+    console.log(`✅ Dimuat dari database (${res.rows.length} kata, ${mc.rows.length} data mute)`);
 
   } catch (err) {
-    console.error("DB blacklist error:", err.message);
+    console.error("DB error:", err.message);
   }
 
 })();
@@ -323,73 +347,114 @@ bot.on("message", async (msg) => {
 });
 
 // =======================
+// HELPER: COUNTER MUTE
+// =======================
+async function addMuteCount(chatId, userId) {
+
+  if (!muteCount[chatId]) muteCount[chatId] = {};
+  muteCount[chatId][userId] = (muteCount[chatId][userId] || 0) + 1;
+
+  const count = muteCount[chatId][userId];
+
+  if (pool) {
+    try {
+      await pool.query(
+        `INSERT INTO mute_counts (chat_id, user_id, count) VALUES ($1, $2, $3)
+         ON CONFLICT (chat_id, user_id) DO UPDATE SET count = $3`,
+        [chatId, userId, count]
+      );
+    } catch (err) {
+      console.error("DB mute_counts error:", err.message);
+    }
+  }
+
+  return count;
+}
+
+async function resetMuteCount(chatId, userId) {
+
+  if (muteCount[chatId]) delete muteCount[chatId][userId];
+
+  if (pool) {
+    try {
+      await pool.query(
+        "DELETE FROM mute_counts WHERE chat_id=$1 AND user_id=$2",
+        [chatId, userId]
+      );
+    } catch (err) {
+      console.error("DB reset mute_counts error:", err.message);
+    }
+  }
+}
+
+// =======================
 // MUTE FUNCTION
 // =======================
 async function muteUser(chatId, userId, msg, reason, customDuration, permanent = false) {
 
   const duration = customDuration || DEFAULT_MUTE_DURATION;
+  let finalReason = reason;
+  let count = 0;
+
+  // Hitung mute (mute permanen dari .warn 3 tidak dihitung)
+  if (!permanent) {
+    count = await addMuteCount(chatId, userId);
+
+    if (count >= MUTE_LIMIT) {
+      permanent = true;
+      finalReason = `Sudah dimute ${MUTE_LIMIT}x. Pelanggaran terakhir: ${reason}`;
+      await resetMuteCount(chatId, userId);
+    }
+  }
+
+  const permissions = {
+    can_send_messages: false,
+    can_send_audios: false,
+    can_send_documents: false,
+    can_send_photos: false,
+    can_send_videos: false,
+    can_send_video_notes: false,
+    can_send_voice_notes: false,
+    can_send_polls: false,
+    can_send_other_messages: false,
+    can_add_web_page_previews: false,
+  };
+
+  const name = escapeMarkdown(msg.from.first_name);
+  let text;
 
   if (permanent) {
 
-    await bot.restrictChatMember(chatId, userId, {
-      permissions: {
-        can_send_messages: false,
-        can_send_audios: false,
-        can_send_documents: false,
-        can_send_photos: false,
-        can_send_videos: false,
-        can_send_video_notes: false,
-        can_send_voice_notes: false,
-        can_send_polls: false,
-        can_send_other_messages: false,
-        can_add_web_page_previews: false,
-      }
-    });
+    // Tanpa until_date = mute selamanya
+    await bot.restrictChatMember(chatId, userId, { permissions });
 
-    const name = escapeMarkdown(msg.from.first_name);
-
-    try {
-      if (lastWarningMessage[chatId]) {
-        await bot.deleteMessage(chatId, lastWarningMessage[chatId]);
-        lastWarningMessage[chatId] = null;
-      }
-    } catch {}
-
-    const sent = await bot.sendMessage(
-      chatId,
+    text =
 `🚫 *PERINGATAN MODERASI*
 \`\`\`
 User  : ${name}
 Muted : PERMANEN
-Alasan: ${reason}
-\`\`\``,
-      { parse_mode: "Markdown" }
-    );
+Alasan: ${finalReason}
+\`\`\``;
 
-    lastWarningMessage[chatId] = sent.message_id;
-    return;
+  } else {
+
+    const until = Math.floor(Date.now() / 1000) + duration;
+
+    await bot.restrictChatMember(chatId, userId, {
+      permissions,
+      until_date: until
+    });
+
+    text =
+`🚫 *PERINGATAN MODERASI*
+\`\`\`
+User  : ${name}
+Muted : ${duration} detik
+Sampai: ${formatDateTime(until * 1000)}
+Alasan: ${finalReason}
+Mute  : ${count}/${MUTE_LIMIT} (ke-${MUTE_LIMIT} = permanen)
+\`\`\``;
   }
-
-  const until = Math.floor(Date.now() / 1000) + duration;
-
-  await bot.restrictChatMember(chatId, userId, {
-    permissions: {
-      can_send_messages: false,
-      can_send_audios: false,
-      can_send_documents: false,
-      can_send_photos: false,
-      can_send_videos: false,
-      can_send_video_notes: false,
-      can_send_voice_notes: false,
-      can_send_polls: false,
-      can_send_other_messages: false,
-      can_add_web_page_previews: false,
-    },
-    until_date: until
-  });
-
-  const name = escapeMarkdown(msg.from.first_name);
-  const untilFormatted = formatDateTime(until * 1000);
 
   try {
     if (lastWarningMessage[chatId]) {
@@ -398,18 +463,7 @@ Alasan: ${reason}
     }
   } catch {}
 
-  const sent = await bot.sendMessage(
-    chatId,
-`🚫 *PERINGATAN MODERASI*
-\`\`\`
-User  : ${name}
-Muted : ${duration} detik
-Sampai: ${untilFormatted}
-Alasan: ${reason}
-\`\`\``,
-    { parse_mode: "Markdown" }
-  );
-
+  const sent = await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   lastWarningMessage[chatId] = sent.message_id;
 
 }
